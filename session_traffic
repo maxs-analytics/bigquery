@@ -1,0 +1,52 @@
+CREATE OR REPLACE TABLE `puragain-water-376123.data_studio.session_traffic` as (
+
+with events as (
+  select
+    cast(event_date as date format 'YYYYMMDD') as date,
+    -- unique session id
+    concat(user_pseudo_id, (select value.int_value from unnest(event_params) where key = 'ga_session_id')) as session_id,
+    user_pseudo_id,
+    -- ga_session_id is the unix timestamp in seconds when the session started
+    (select value.int_value from unnest(event_params) where key = 'ga_session_id') as session_start,
+    (CASE
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location') LIKE "http%gclid=%" THEN "google" 
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location') LIKE "http%fbclid=%" THEN "facebook"
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location') LIKE "http%msclkid=%" THEN "bing"
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location') LIKE "http%ttclid=%" THEN "tiktok"
+    ELSE 
+      coalesce((select value.string_value from unnest(event_params) where key = 'source'), "direct") end) as source,
+    (CASE
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location') LIKE "http%gclid=%" THEN "cpc" 
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location') LIKE "http%fbclid=%" THEN "paid_social"
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location') LIKE "http%msclkid=%" THEN "cpc"
+      WHEN (SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location') LIKE "http%ttclid=%" THEN "paid_social"
+    ELSE 
+      coalesce((select value.string_value from unnest(event_params) where key = 'medium'), "none") end) as medium,
+    ifnull(regexp_extract((select value.string_value from unnest(event_params) where key = 'page_location'), r'(?:\?|&)utm_campaign=([^&]+)'), (select value.string_value from unnest(event_params) where key = 'campaign')) as campaign,
+    -- flag the session's first event
+    if(
+      row_number() over(
+        partition by concat(user_pseudo_id, (select value.int_value from unnest(event_params) where key = 'ga_session_id'))
+        order by
+          event_timestamp asc
+      ) = 1,
+      true,
+      false
+    ) as session_first_event
+  from
+    `<project_id>.<dataset_id>.<table_id>`
+  where
+    _TABLE_SUFFIX = FORMAT_DATE("%Y%m%d", (CURRENT_DATE() - 2))
+    and event_name not in ('session_start', 'first_visit') qualify session_first_event = true
+)
+
+select
+  date,
+  session_id,
+  user_pseudo_id,
+  session_start,
+  ifnull(source,last_value(source ignore nulls) over(partition by user_pseudo_id order by session_start range between 2592000 preceding and current row)) as session_source,
+  ifnull(medium,last_value(medium ignore nulls) over(partition by user_pseudo_id order by session_start range between 2592000 preceding and current row)) as session_medium,  
+  ifnull(campaign,last_value(campaign ignore nulls) over(partition by user_pseudo_id order by session_start range between 2592000 preceding and current row)) as session_campaign
+from
+  events)
