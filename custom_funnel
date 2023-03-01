@@ -1,0 +1,60 @@
+insert into `<project_id>.<dataset_id>.<table_id>` (
+WITH q1 AS (
+SELECT
+  main_table.user_pseudo_id,
+  (SELECT value.int_value FROM UNNEST(main_table.event_params) WHERE key='ga_session_id') AS session_id,
+  main_table.event_date,
+  main_table.device.category as device,
+  ARRAY_AGG(concat(IFNULL(event_name, "NULL"),"|", IFNULL((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'author_step'), "null"),"|",ifnull((SELECT value.string_value FROM UNNEST(event_params) WHERE key='page_location'),"null"), "|", ifnull((SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_referrer'), "null")) ORDER BY main_table.event_timestamp) as event_author_step_location_sequence
+FROM `<project_id>.<dataset_id>.events_intraday_*` as main_table
+
+WHERE _TABLE_SUFFIX = FORMAT_DATE("%Y%m%d", (CURRENT_DATE() - 2))
+
+GROUP BY
+  1, 2, 3, 4),
+q2 as (
+  SELECT *,
+  ( select min(offset) 
+    from unnest(event_author_step_location_sequence) pls with offset 
+    where REGEXP_CONTAINS(pls, "^(authorCTA.*|app_cta_click\\|1\\-.*).*\\/writer.*go.smodin.io.*")
+  ) step_1,
+  ( select array_agg(DISTINCT offset IGNORE NULLS ORDER BY offset asc)
+    from unnest(event_author_step_location_sequence) pls with offset 
+    where REGEXP_CONTAINS(pls, "^(authorControlStep2.*|app_cta_click\\|2\\-.*).*\\/writer.*")
+  ) step_2,
+  ( select array_agg(DISTINCT offset IGNORE NULLS ORDER BY offset asc)
+    from unnest(event_author_step_location_sequence) pls with offset 
+    where REGEXP_CONTAINS(pls, "^(AuthorControlStep3.*|app_cta_click\\|3\\-.*).*\\/writer.*")
+  ) step_3,
+  ( select array_agg(DISTINCT offset IGNORE NULLS ORDER BY offset asc)
+    from unnest(event_author_step_location_sequence) pls with offset 
+    where REGEXP_CONTAINS(pls, "^(page_view.*).*\\/pricing.*")
+  ) step_4,
+  ( select array_agg(DISTINCT offset IGNORE NULLS ORDER BY offset asc)
+    from unnest(event_author_step_location_sequence) pls with offset 
+    where REGEXP_CONTAINS(pls, "^(begin_checkout|sign_up).*")
+  ) step_5,
+  ( select array_agg(DISTINCT offset IGNORE NULLS ORDER BY offset asc)
+    from unnest(event_author_step_location_sequence) pls with offset 
+    where REGEXP_CONTAINS(pls, "^purchase.*")
+  ) step_6
+FROM q1)
+
+SELECT 
+q1.user_pseudo_id as user_pseudo_id,
+q1.session_id as session_id,
+q1.event_date as sequence_date,
+q1.device as device,
+if(step_1 is not null, 1, 0) as step_1,
+if((select min(pls) from (select pls from unnest(step_2) pls where pls > step_1)) is not null, 1, 0) as step_2,
+if((select min(pls) from (select pls from unnest(step_3) pls where pls > (select min(pls) from (select pls from unnest(step_2) pls where pls > step_1)))) is not null, 1, 0) as step_3,
+if((select min(pls) from (select pls from unnest(step_4) pls where pls > (select min(pls) from (select pls from unnest(step_3) pls where pls > (select min(pls) from (select pls from unnest(step_2) pls where pls > step_1)))))) is not null, 1, 0) as step_4,
+if((select min(pls) from (select pls from unnest(step_5) pls where pls > (select min(pls) from (select pls from unnest(step_4) pls where pls > (select min(pls) from (select pls from unnest(step_3) pls where pls > (select min(pls) from (select pls from unnest(step_2) pls where pls > step_1)))))))) is not null, 1, 0) as step_5,
+if((select min(pls) from (select pls from unnest(step_5) pls where pls > (select min(pls) from (select pls from unnest(step_5) pls where pls > (select min(pls) from (select pls from unnest(step_4) pls where pls > (select min(pls) from (select pls from unnest(step_3) pls where pls > (select min(pls) from (select pls from unnest(step_2) pls where pls > step_1)))))))))) is not null, 1, 0) as step_6
+
+
+FROM q1 LEFT JOIN q2 USING(user_pseudo_id, session_id, event_date, device)
+
+where step_1 is not null)
+
+
