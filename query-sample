@@ -1,0 +1,42 @@
+insert into `<project_id>.<dataset_id>.<table_id>` (
+
+WITH event_params AS (
+SELECT
+  CONCAT(user_pseudo_id, (SELECT value.int_value FROM UNNEST(event_params) WHERE key = "ga_session_id")) AS session_id,
+  PARSE_DATE("%Y%m%d",event_date) AS event_date,
+  FORMAT("%02d",EXTRACT(HOUR FROM TIMESTAMP_MICROS(event_timestamp))) AS hour,
+  event_name,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = "ga_session_number") AS ga_session_number,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = "ga_session_id") AS ga_session_id,
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = "page_location") AS page_location,
+  (SELECT value.int_value FROM UNNEST(event_params) WHERE key = "entrances") AS entrances,
+  user_id,
+  user_pseudo_id,
+  device.category AS device_category,
+  device.language AS device_language,
+  geo.country AS geo_country,
+  traffic_source.source AS user_source,
+  traffic_source.medium AS user_medium,
+  traffic_source.name AS user_campaign,
+  ecommerce.total_item_quantity AS ecommerce_total_item_quantity,
+  ecommerce.purchase_revenue AS ecommerce_purchase_revenue,
+  ecommerce.refund_value AS ecommerce_refund_value,
+  ecommerce.shipping_value AS ecommerce_shipping_value,
+  ecommerce.tax_value AS ecommerce_tax_value,
+  ecommerce.unique_items AS ecommerce_unique_items,
+  ecommerce.transaction_id AS ecommerce_transaction_id,
+FROM
+  `<project_id>.<dataset_id>.events_*`
+  where _TABLE_SUFFIX = FORMAT_DATE("%Y%m%d", (CURRENT_DATE() - 2)))
+
+SELECT
+  event_params.*,
+  session_source.session_source,
+  session_source.session_medium,
+  session_source.session_campaign
+FROM
+  event_params
+LEFT JOIN
+  (select * from `<project_id>.<dataset_id>.session_traffic`) as session_source ON event_params.session_id = session_source.session_id
+)
+
