@@ -1,0 +1,210 @@
+from google.cloud import bigquery
+from google.cloud.exceptions import NotFound
+import logging
+import base64
+from facebook_business.api import FacebookAdsApi
+from facebook_business.adobjects.adaccount import AdAccount
+from facebook_business.adobjects.adsinsights import AdsInsights
+from facebook_business.adobjects.adreportrun import AdReportRun
+import time
+
+logger = logging.getLogger()
+
+schema_facebook_stat = [
+    bigquery.SchemaField("date", "DATE", mode="REQUIRED"),
+    bigquery.SchemaField("ad_name", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("adset_name", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("campaign_name", "STRING", mode="REQUIRED"),
+    bigquery.SchemaField("clicks", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("impressions", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("reach", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("spend", "FLOAT", mode="REQUIRED"),
+    bigquery.SchemaField("revenue", "FLOAT", mode="REQUIRED"),
+    bigquery.SchemaField("link_clicks", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("view_content", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("add_to_cart", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("initiate_checkout", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("purchase", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("lead", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("post_share", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("post_reaction", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("page_like", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("post_comment", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("post_saves", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("video_play", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("page_engagement", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("post_engagement", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("messaging_conversation_starting", "INTEGER", mode="REQUIRED"),
+    bigquery.SchemaField("new_messaging_conversation", "INTEGER", mode="REQUIRED")
+]
+
+
+def exist_dataset_tables(client: bigquery.Client, table_id: str, dataset_id: str, project_id: str, schema, clustering_fields=None) -> str:
+    
+    dataset_ref = f"{project_id}.{dataset_id}"
+    
+    # Check if the dataset exists, if not, create it.
+    try:
+        client.get_dataset(dataset_ref)  # Make an API request.
+    except NotFound:
+        dataset = bigquery.Dataset(dataset_ref)
+        dataset.location = "US"
+        dataset = client.create_dataset(dataset)  # Make an API request.
+        logger.info(f"Created dataset {client.project}.{dataset.dataset_id}")
+
+    table_ref = f"{project_id}.{dataset_id}.{table_id}"
+    
+    # Check if the table exists, if not, create it.
+    try:
+        client.get_table(table_ref)  # Make an API request.
+    except NotFound:
+        table = bigquery.Table(table_ref, schema=schema)
+        table.time_partitioning = bigquery.TimePartitioning(
+            type_=bigquery.TimePartitioningType.DAY,
+            field="date"
+        )
+        
+        # If clustering fields are provided, apply them.
+        if clustering_fields:
+            table.clustering_fields = clustering_fields
+
+        table = client.create_table(table)  # Make an API request.
+        logger.info(f"Created table {table.project}.{table.dataset_id}.{table.table_id}")
+
+    return 'ok'
+
+
+def insert_rows(client: bigquery.Client, table_id: str, dataset_id: str, project_id: str, data: list) -> None:
+    
+    table_ref = f"{project_id}.{dataset_id}.{table_id}"
+    table = client.get_table(table_ref)
+
+    try:
+        resp = client.insert_rows_json(json_rows=data, table=table_ref)
+        # It's a good practice to check for errors in the response
+        if resp:
+            for error in resp:
+                logger.error(f"Error inserting row: {error}")
+        else:
+            logger.info(f"Successfully uploaded to table {table.table_id}")
+    except Exception as e:
+        logger.error(f"Failed to insert rows: {e}")
+
+
+
+def get_facebook_data(event, context):
+    pubsub_message = base64.b64decode(event['data']).decode('utf-8')
+    bigquery_client = bigquery.Client()
+
+    if pubsub_message != 'get_facebook':
+        logger.info(f"Unexpected message: {pubsub_message}")
+        return 'Error'
+
+    attributes = event['attributes']
+    table_id = attributes['table_id']
+    dataset_id = attributes['dataset_id']
+    project_id = attributes['project_id']
+    app_id = attributes['app_id']
+    app_secret = attributes['app_secret']
+    access_token = attributes['access_token']
+    account_id = attributes['account_id']
+    date_preset = attributes['date_preset']
+
+    try:
+    
+        FacebookAdsApi.init(app_id, app_secret, access_token, api_version='v16.0')
+
+        account = AdAccount('act_' + str(account_id))
+
+        fields_ads = [
+            AdsInsights.Field.campaign_name,
+            AdsInsights.Field.adset_name,
+            AdsInsights.Field.ad_name,
+            AdsInsights.Field.spend,
+            AdsInsights.Field.impressions,
+            AdsInsights.Field.reach,
+            AdsInsights.Field.clicks,
+            AdsInsights.Field.actions,
+            AdsInsights.Field.action_values
+        ]
+
+        params_ads = {
+            'level': 'ad',
+            'date_preset': date_preset,
+            'time_increment': 1,
+            'filtering': [{'field': 'ad.effective_status', 'operator': 'IN', 'value': ['ACTIVE', 'PAUSED', 'DELETED', 'ARCHIVED', 'PENDING_REVIEW', 'DISAPPROVED','PREAPPROVED', 'PENDING_BILLING_INFO', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED', 'IN_PROCESS', 'WITH_ISSUES']}]
+        }
+
+        async_job = account.get_insights(fields=fields_ads, params=params_ads, is_async=True)
+        async_job.api_get()
+        while async_job[AdReportRun.Field.async_status] != 'Job Completed':
+            time.sleep(1)
+            async_job.api_get()
+        time.sleep(1)
+        ads_insights = async_job.get_result()
+
+    except FacebookRequestError as e:
+        logger.info(e)
+        print(e)
+        raise
+        
+    action_types = [
+        ('revenue', ['offsite_conversion.fb_pixel_purchase']),
+        ('link_clicks', ['link_click']),
+        ('view_content', ['view_content']),
+        ('add_to_cart', ['add_to_cart']),
+        ('initiate_checkout', ['initiate_checkout']),
+        ('purchase', ['purchase']),
+        ('lead', ['lead']),
+        ('post_share', ['post']),
+        ('post_reaction', ['post_reaction']),
+        ('page_like', ['like']),
+        ('post_comment', ['comment']),
+        ('post_saves', ['onsite_conversion.post_save']),
+        ('video_play', ['video_view']),
+        ('page_engagement', ['page_engagement']),
+        ('post_engagement', ['post_engagement']),
+        ('messaging_conversation_starting', ['onsite_conversion.messaging_conversation_started_7d']),
+        ('new_messaging_conversation', ['onsite_conversion.messaging_first_reply'])
+    ]
+
+
+    fb_source = []
+
+    for item in ads_insights:
+
+        row_data = {
+            'date': item['date_start'],
+            'ad_name': item['ad_name'],
+            'adset_name': item['adset_name'],
+            'campaign_name': item['campaign_name'],
+            'clicks': item['clicks'],
+            'impressions': item['impressions'],
+            'reach': item['reach'],
+            'spend': item['spend']
+        }
+
+        actions = item.get('actions')
+        action_values = item.get('action_values')
+
+        for column, action_keys in action_types:
+            try:
+                relevant_list = action_values if column == 'revenue' else actions
+                value = list(filter(lambda action: action['action_type'] in action_keys, relevant_list))[0]['value']
+                row_data[column] = value
+            except:
+                row_data[column] = 0
+
+        fb_source.append(row_data)
+
+    if exist_dataset_tables(bigquery_client, table_id, dataset_id, project_id, schema_facebook_stat) == 'ok':
+
+        insert_rows(bigquery_client, table_id, dataset_id, project_id, fb_source)
+            
+        return 'ok'
+
+    else:
+
+        logger.error("Error in checking/creating dataset or table.")
+            
+        return 'Error'
